@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Data / uploads (keep structure, not content)
+data/raw/
+data/processed/
+*.gpx
+
+# Environment
+.env
+*.env
+
+# IDE
+.vscode/
+.idea/
+*.DS_Store
