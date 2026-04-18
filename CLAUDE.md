@@ -19,7 +19,7 @@ Initial focus race is **Badwater 135**, backed by a world-class ultramarathoner'
 | Modeling | `scikit-learn` (fatigue/pace decay), `scipy` (constrained optimization) |
 | Weather | NOAA API (historical + forecast by location/date) |
 | Athlete data | Strava or Garmin export (GPS, HR) |
-| External data | UltraSignup + DUV scraped for historical splits and DNF patterns |
+| External data | DUV scraped for historical splits and DNF patterns |
 
 Deployed via Streamlit Community Cloud from this GitHub repo.
 
@@ -34,7 +34,51 @@ Deployed via Streamlit Community Cloud from this GitHub repo.
 ## Key Modules
 
 - `course.py` — GPX parsing; returns clean course profile with elevation, grade per segment, and distance
-- Additional modules TBD as the project develops
+- `src/scrapers/duv.py` — DUV scraper (race discovery + result fetching)
+- `scripts/build_race_list.py` — CLI to build/refresh `data/races.json`
+
+## DUV Scraper
+
+Source: `statistik.d-u-v.org`
+
+**Event list**
+```
+GET /geteventlist.php?year=all&dist=all&country=all&Language=EN&sort=1&page=<N>
+```
+- 1,000 events per page; ~116 pages; 115,688 total events
+- Columns: date | name (COUNTRY) | distance | finishers | IAU label
+- `finishers > 0` confirms results exist — no per-race HTTP check needed
+- Form filter params: `year`, `dist` (50km/50mi/100km/100mi/1/2/4/8/6h/12h/24h/…), `country` (3-letter code or continent number), `surface` (Road/Trail/Stage/Track/Indoo/Elim/Backy/Walk)
+
+**Results for one race-year**
+```
+GET /getresultevent.php?event=<event_id>&Language=EN
+```
+- HTML page; parse `tr.odd` / `tr.even` rows for participant data
+
+**Data model**
+- Each DUV `event_id` = one specific year's race instance (no stable cross-year race ID)
+- Race names include trailing country code: `"Western States 100 Mile Endurance Run (USA)"`
+- Races are grouped across years by stripping the `(XXX)` suffix and normalizing to lowercase
+
+**races.json schema**
+```json
+{
+  "name":          "Western States 100 Mile Endurance Run",
+  "country":       "USA",
+  "distances":     "100mi",
+  "has_results":   true,
+  "duv_event_ids": [109409, 99813, 89039]
+}
+```
+`duv_event_ids` is sorted most-recent-first.
+
+**Running the scraper**
+```bash
+python scripts/build_race_list.py            # full build (~2 min)
+python scripts/build_race_list.py --pages 5  # first 5 pages, for testing
+python scripts/build_race_list.py --limit 50 # cap output races
+```
 
 ## Model Features
 
@@ -66,7 +110,7 @@ Features are grouped by source. Not all sources are implemented yet — this is 
 - Trail technicality rating (runnable vs hike-mandatory)
 - Exposure level (open/sunny vs shaded)
 
-**Historical Race Data** *(scraped — UltraSignup, DUV)*
+**Historical Race Data** *(scraped — DUV)*
 - DNF rate by year; historical finish times by competitive tier
 - Aid station splits for top / median / back-of-pack finishers
 - Common DNF locations on course
