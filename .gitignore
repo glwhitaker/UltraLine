@@ -17,18 +17,25 @@ env/
 # Streamlit
 .streamlit/secrets.toml
 
-# Data / uploads (keep structure, not content)
-data/raw/
-data/processed/
+# Data — all generated/scraped; re-derivable from scripts/
+data/
+
+# SQLite WAL files (in case DB lands outside data/)
+*.db
+*.db-shm
+*.db-wal
+
+# Trained model artifacts
+*.pkl
+
+# GPX uploads
 *.gpx
 
 # Environment
 .env
 *.env
 
-# IDE
+# IDE / OS
 .vscode/
 .idea/
 *.DS_Store
-
-/docs

@@ -122,6 +122,10 @@ Features are grouped by source. Not all sources are implemented yet — this is 
 - Cutoff times at each aid station
 - Projected distance before heat peak; distance covered in darkness
 
+## Documentation
+
+- [`docs/ml/strategy_v1.md`](docs/ml/strategy_v1.md) — ML modeling strategy: data phases, modeling tasks (pace decay, finish time, DNF probability, crew optimization), model progression, feature set, evaluation metrics, and implementation workflow
+
 ## Development Notes
 
 - Code should be modular and loosely coupled — the project is built iteratively
