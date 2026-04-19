@@ -18,7 +18,7 @@ env/
 .streamlit/secrets.toml
 
 # Data — all generated/scraped; re-derivable from scripts/
-data/
+/data/
 
 # SQLite WAL files (in case DB lands outside data/)
 *.db
