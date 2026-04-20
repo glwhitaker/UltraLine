@@ -1,4 +1,4 @@
-# ML Strategy: Data Analysis — Iteration 1
+# ML Strategy: Data Analysis — Iteration 1 (amended)
 
 ## Overview
 
@@ -13,7 +13,7 @@ Public race results scraped from **DUV (Deutsche Ultramarathon Vereinigung)**, o
 - Thousands of results across many races, distances, and years
 - Athlete-level identifiers enabling cross-race longitudinal profiling
 - Historical depth sufficient for population-level modeling
-- **DNF data is not available from DUV.** Neither the event results page nor the athlete personal page exposes DNF records in a parseable form. DUV publishes finishers only. Any feature requiring DNF history must come from an alternative source.
+- **DNF data is available from DUV at the athlete history level.** The event results page (`getresultevent.php`) publishes finishers only. However, the athlete personal page (`getresultperson.php`) does expose DNF and DNS records in each athlete's career history. These are parsed and stored in `athlete_results.dnf` (1 = DNF/DNS, 0 = finish). DNF data is therefore available as a longitudinal career feature but cannot be derived from event-level scraping alone.
 
 ### Secondary Data Source
 Detailed fitness history for one elite ultramarathoner (training logs, physiological data). Used for individual model calibration and validation, not primary training.
@@ -21,20 +21,31 @@ Detailed fitness history for one elite ultramarathoner (training logs, physiolog
 ### Data Collection Phases
 
 **Phase 1 — Index (complete)**
-A map of races and their DUV IDs across multiple years has been constructed. This serves as the reference index for all subsequent data pulls.
+A map of all DUV races and their event IDs across all available years has been constructed via paginated scraping of `geteventlist.php` (~116 pages, 115k+ events). Stored in `data/races.json`. This serves as the reference index for all subsequent data pulls.
 
 **Phase 2 — Anchor race deep pull (complete)**
-Pull all available results for the anchor race (Badwater 135) — every finisher across all available years. Capture athlete IDs alongside results to enable longitudinal cross-referencing. Note: DNF records are not available from DUV; only finisher rows are published.
+All available results for the anchor race (Badwater 135) have been pulled — every finisher across all available years — via `fetch_race_history.py`. Athlete IDs are captured alongside results and stored in SQLite (`race_events` and `results` tables) to enable longitudinal cross-referencing.
 
-**Phase 3 — Data audit**
-Before modeling, document the actual shape of the data: results per year, field population rates, DNF record structure, and any inconsistencies. This drives all subsequent feature and pipeline decisions.
+**Phase 3 — Full athlete career pull (complete)**
+Rather than pulling results for specific related races, the full DUV career history for every athlete who has ever appeared in a Badwater result is fetched via `fetch_athletes.py`. This uses the athlete personal page (`getresultperson.php`) to retrieve every race that athlete has ever recorded on DUV — regardless of race name, distance, or country. Results are stored in `athlete_results`.
 
-**Phase 4 — Related race expansion**
-Pull results from races that share athlete pools with Badwater 135 (e.g. Western States, Leadville, Moab 240). Used to build longitudinal athlete profiles from public data.
+This approach is broader than a targeted related-race expansion. It captures Western States, Leadville, Moab 240, and any other race the athlete has run, without requiring those races to be explicitly named or their event IDs to be known in advance. The tradeoff is that `athlete_results` contains heterogeneous race data (varying distances, surfaces, and formats) that must be filtered carefully during feature engineering.
+
+The scraper is resumable: `fetched_at` on the `athletes` table acts as a progress flag. Re-running `fetch_athletes.py` skips already-fetched athletes automatically.
+
+**Phase 4 — Data audit**
+Before expanding modeling beyond Badwater, document the actual shape of the data: results per year, field population rates, null rates per column, and surface/distance distribution in `athlete_results`. Known issues to audit for:
+- Early Badwater years (pre-1990) have thin or missing finish time data
+- Course distance was 146mi in early editions, not 135mi
+- DUV coverage skews European; some American athletes may have sparse histories
+
+**Phase 5 — GPX course feature derivation (planned)**
+Parse GPX data for the anchor race course to derive segment-level features: grade, cumulative elevation gain, distance to crew points, distance to aid stations. This is the primary data source for pace decay modeling and cannot be derived from DUV results. Some infrastructure exists in `src/course.py`.
 
 ### Known Data Considerations
-- DUV coverage skews European; Badwater 135 is American-centric and may have thinner coverage than European ultras
-- Surface and course difficulty vary widely across events; race type encoding is important
+- `athlete_results` contains the full career history of each Badwater athlete — not filtered to any specific race or distance. Feature engineering must filter appropriately (e.g. `distance_value = 100 AND distance_unit = 'mi'` for 100-mile comparisons) and must use only pre-race history to avoid temporal leakage
+- Surface and course difficulty vary widely across events in `athlete_results`; a road 100-miler and a mountain trail 100-miler are not directly comparable. Surface encoding will matter when using cross-race pace data as features
+- `results` (event-level) and `athlete_results` (career-level) overlap in coverage — both contain finish times for many of the same races. They are complementary, not redundant: `results` has richer per-finish detail (place, age group, performance score); `athlete_results` has DNF flags and broader career coverage
 - Result quality is uneven across self-reported events; audit for sparse fields before relying on them
 
 ---
@@ -88,19 +99,28 @@ While the public dataset is large in result count, it is relatively shallow in f
 - `race_type` — surface/format encoding (road, trail, track, etc.)
 - `finishing_time` — target variable for finish time prediction
 - `checkpoint_splits` — intermediate split times where available
-- `dnf_flag` — boolean finish/DNF outcome (**not available from DUV**; omit or source elsewhere)
+- `dnf_flag` — boolean finish/DNF outcome; available from `athlete_results.dnf` (sourced from athlete personal page, not event results page)
 - `athlete_age_group` — where available in results
 - `year` — race year; captures field evolution over time
 
-### Longitudinal Athlete Features (derived by cross-referencing athlete IDs)
-- `athlete_race_count` — total number of DUV-recorded races; proxy for experience level
-- `races_last_12_months` — race frequency over the past year; volume signal
-- `days_since_last_race` — days between most recent race and current race; freshness/recovery signal
-- `distance_step_up` — boolean; is this race longer than the athlete's previous longest distance? Step-ups carry elevated risk
-- `avg_finish_time_by_distance` — mean finish time for races at this distance; baseline performance expectation
-- `performance_trend` — slope of finish time over last N races at similar distance; captures improvement or decline
+### Longitudinal Athlete Features (derived from `athlete_results`)
+These features are computed per-athlete using only races prior to the race being predicted. This is enforced in `features.py` via strict `year < race_year` filtering. Violating this constraint introduces temporal leakage.
 
-### Segment-Level Features (for pace decay modeling)
+- `career_race_count` — total prior DUV-recorded races; proxy for experience level
+- `races_last_12_months` — race frequency over the prior year; volume signal
+- `days_since_last_race` — days between most recent prior race and current race; freshness/recovery signal
+- `distance_step_up` — boolean; is this race longer than the athlete's previous longest distance? Step-ups carry elevated risk
+- `avg_finish_time_100mi_hrs` — mean finish time for prior 100-mile finishes across all races in `athlete_results`; strongest available pace signal
+- `prior_badwater_count` — number of prior Badwater finishes; course-specific experience
+- `prior_badwater_avg_time_hrs` — mean finish time for prior Badwater finishes; course-specific pace baseline
+- `performance_trend` — slope of finish time over last 5 finishes at ≥100mi; captures improvement or decline
+- `has_history` — binary flag; whether any prior race history exists for this athlete (low-signal; candidate for removal)
+
+Note: ACWR (Acute:Chronic Workload Ratio) is not applicable here. It requires continuous daily/weekly training load data designed for high-frequency training. Ultramarathon athletes race infrequently; use `races_last_12_months`, `days_since_last_race`, and `distance_step_up` to capture the same underlying concerns from data that actually exists.
+
+### Segment-Level Features (for pace decay modeling — requires GPX)
+These features cannot be derived from DUV. They require GPX course data and, where available, live athlete device data.
+
 - `distance_into_race` — cumulative distance at segment start
 - `cumulative_elevation_gain` — total elevation gain to current segment
 - `segment_grade` — grade (%) of the current segment
@@ -114,10 +134,10 @@ While the public dataset is large in result count, it is relatively shallow in f
 - `miles_to_next_aid_station`
 
 ### Engineered Features (high priority)
-- **Race volume and recency features** — ACWR is not applicable here; it requires continuous daily/weekly training load data and is designed for athletes training at high frequency. Ultramarathon athletes race infrequently (weeks to months between events), making the 7-day/28-day rolling window meaningless. Use `races_last_12_months`, `days_since_last_race`, and `distance_step_up` instead — these capture the same underlying concern (is the athlete fresh and adequately prepared?) from data that actually exists
-- **Grade-adjusted pace** — apply a formula consistent with Strava's GAP metric; normalizes pace across elevation profiles
+- **Grade-adjusted pace** — apply a formula consistent with Strava's GAP metric; normalizes pace across elevation profiles; requires GPX
 - **Heat stress thresholds** — pace/heat relationship is non-linear; performance degrades sharply past certain wet bulb thresholds; encode threshold crossings as binary features in addition to raw values
 - **Checkpoint pace deltas** — rate of pace change between checkpoints; strong signal for both finish time and DNF prediction
+- **Surface-normalized pace** — when computing `avg_finish_time_100mi_hrs` across heterogeneous `athlete_results`, consider normalizing by surface type to avoid treating road and trail 100-milers as equivalent
 
 > Feature engineering will likely yield more improvement than model switching. Prioritize this work over hyperparameter tuning.
 
@@ -130,8 +150,16 @@ While the public dataset is large in result count, it is relatively shallow in f
 - Validation: ~15%
 - Test: ~15%
 
+Current boundaries for Badwater finish time model:
+- Train: years < 2017 (~1,105 rows after null drop)
+- Val: 2017–2021 (~291 rows)
+- Test: 2022–present (~333 rows)
+
 ### Critical Constraint: Chronological Split
 This is time series data — order matters. **Do not use random splits.** Split chronologically: earlier race years train the model, later years validate and test. This mirrors real-world usage.
+
+### Cross-Validation Note
+Standard K-fold cross-validation randomly mixes folds and is **not appropriate** for time-series data. If cross-validation is used for more stable performance estimates, use `sklearn.model_selection.TimeSeriesSplit`, which respects chronological order.
 
 ### Test Set Protocol
 The test set is touched **once**, at the end, to report final performance. Do not evaluate on the test set during iterative development. Repeated evaluation against the test set introduces optimistic bias.
@@ -148,10 +176,10 @@ The test set is touched **once**, at the end, to report final performance. Do no
 
 | Tool | When to Apply |
 |---|---|
-| Cross-validation (K-fold) | Standard practice; use instead of a single train/val split for more stable estimates |
+| Cross-validation (TimeSeriesSplit) | Use instead of a single train/val split for more stable estimates; must be time-aware |
 | Regularization | Linear models: Ridge (L2) or Lasso (L1); tree models: `max_depth`, `min_samples_leaf` |
 | Early stopping | Gradient boosting only; stop adding trees when validation error plateaus |
-| Feature pruning | Use Random Forest feature importances to drop low-signal features |
+| Feature pruning | Use Random Forest feature importances to drop low-signal features; `has_history` is a current candidate for removal |
 
 ---
 
@@ -161,7 +189,7 @@ The test set is touched **once**, at the end, to report final performance. Do no
 
 | Metric | Priority | Notes |
 |---|---|---|
-| **MAE (Mean Absolute Error)** | Primary | Interpretable as "off by X minutes"; most meaningful to the end user |
+| **MAE (Mean Absolute Error)** | Primary | Interpretable as "off by X hours/minutes"; most meaningful to the end user |
 | **RMSE (Root Mean Squared Error)** | Secondary | Penalizes large errors more; useful if prediction blowouts are especially costly |
 | **R²** | Sanity check | Values near 0 mean the model is no better than predicting the mean |
 
@@ -191,7 +219,7 @@ Always evaluate on the validation set during development. Report final numbers o
 | `n_estimators` | Number of trees; more is generally better up to diminishing returns |
 | `max_depth` | Tree depth; primary overfitting lever |
 | `min_samples_leaf` | Minimum samples at leaf nodes; secondary overfitting lever |
-| `max_features` | Features considered at each split |
+| `max_features` | Features considered at each split; reducing forces more feature diversity across trees |
 
 > Do not tune hyperparameters before validating data quality and feature set. Tuning bad features is wasted effort.
 
@@ -202,20 +230,28 @@ Always evaluate on the validation set during development. Report final numbers o
 Execute in this order. Do not skip ahead.
 
 ```
-1. Anchor race data pull     → pull all Badwater 135 results from DUV; capture athlete IDs
-2. Data audit                → document field population, result counts, DNF structure
-3. Related race expansion    → pull results from races sharing the Badwater athlete pool
-4. Longitudinal profiles     → cross-reference athlete IDs to build historical feature set
-5. Baseline model            → predict mean / historical rate; record metrics
-6. Logistic regression       → DNF classification baseline
-7. Linear regression         → finish time and pace regression baseline
-8. Random Forest             → train with defaults on both tasks; compare
-9. Feature engineering       → add ACWR proxy, GAP, heat thresholds, checkpoint deltas; retrain
-10. Cross-validation         → K-fold on best model for stable performance estimate
-11. Hyperparameter tuning    → randomized search on best model
-12. Individual calibration   → fine-tune population model on single-athlete fitness data
-13. Final evaluation         → run on test set once; record and report metrics
-14. Integration              → wire into app if performance is acceptable
+1. Anchor race data pull        → pull all Badwater 135 results from DUV; capture athlete IDs
+                                   stored in: race_events, results tables
+2. Full athlete career pull     → for every athlete_id in Badwater results, fetch their complete
+                                   DUV history via getresultperson.php; stored in: athletes,
+                                   athlete_results tables; resumable via fetched_at flag
+3. Data audit                   → document field population, null rates, finish time coverage
+                                   by year, distance/surface distribution in athlete_results
+4. Export training data         → derive Parquet snapshots from SQLite via export_training_data.py;
+                                   produces population_results, athlete_features, model_data
+5. Baseline model               → predict gender-stratified median finish time; record metrics
+6. Linear regression (Ridge)    → finish time regression with L2 regularization; record metrics
+7. Random Forest                → train with defaults; compare to baseline and Ridge
+8. Feature engineering          → add surface-normalized pace, expand longitudinal features;
+                                   re-export and retrain
+9. Cross-validation             → TimeSeriesSplit on best model for stable performance estimate
+10. Hyperparameter tuning       → RandomizedSearchCV on best model
+11. GPX course feature pipeline → parse course GPX; derive segment-level features for
+                                   pace decay and DNF modeling
+12. DNF probability model       → classification model using checkpoint splits + career features
+13. Individual calibration      → fine-tune population model on single-athlete fitness data
+14. Final evaluation            → run on test set once; record and report metrics
+15. Integration                 → wire into app if performance is acceptable
 ```
 
 ---
@@ -233,4 +269,4 @@ Execute in this order. Do not skip ahead.
 
 ---
 
-*This document reflects Iteration 1 strategy. Update when modeling assumptions change or new data sources are incorporated.*
+*This document reflects Iteration 1 strategy (amended). Update when modeling assumptions change or new data sources are incorporated.*
