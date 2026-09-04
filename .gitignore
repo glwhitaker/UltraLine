@@ -18,9 +18,10 @@ env/
 .streamlit/secrets.toml
 
 # Data — all generated/scraped; re-derivable from scripts/
-# races.json is excluded: it's a static UI dependency shipped with the app
+# races.json and curated_races.json are static UI dependencies shipped with the app
 /data/**
 !/data/races.json
+!/data/curated_races.json
 
 # SQLite WAL files (in case DB lands outside data/)
 *.db
